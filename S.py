@@ -141,7 +141,7 @@ class OrthogonalTransform(nn.Module):
         self.weight.data = torch.mm(u, v.t())
         return x @ self.weight
 
-class ModifiedPCAFeedForward(nn.Module):
+class FeedFoward(nn.Module):
     def __init__(self, n_embd, pca_dim,compression_rate=0.1, pca_dim_reduction=0.8):
         super().__init__()
         self.compression_rate = compression_rate
@@ -162,13 +162,13 @@ class ModifiedPCAFeedForward(nn.Module):
 
 
 
-class ModifiedTransformerBlock(nn.Module):
+class Block(nn.Module):
     def __init__(self, n_embd, n_head, pca_dim):
         super().__init__()
         self.ln1 = RMSNorm(n_embd)
         self.attn = MultiHeadAttention(n_head, n_embd // n_head)
         self.ln2 = RMSNorm(n_embd)
-        self.ff = ModifiedPCAFeedForward(n_embd, pca_dim)
+        self.ff = FeedFoward(n_embd, pca_dim)
         self.orthogonal_transform_input = OrthogonalTransform(n_embd)
         self.orthogonal_transform_output = OrthogonalTransform(n_embd)
 
@@ -182,12 +182,12 @@ class ModifiedTransformerBlock(nn.Module):
         x = self.orthogonal_transform_output(x) + x
         return x
 
-class ModifiedGPTLanguageModel(nn.Module):
+class GPTLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.vocab_size = len(chars)  
         pca_dim = int(n_embd * pca_dim_reduction)
-        self.blocks = nn.Sequential(*[ModifiedTransformerBlock(n_embd, n_head, pca_dim) for _ in range(n_layer)])
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head, pca_dim) for _ in range(n_layer)])
 
         self.token_embedding_table = nn.Embedding(self.vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
@@ -243,7 +243,7 @@ class ModifiedGPTLanguageModel(nn.Module):
         return idx
 
 chars = sorted(list(set(text)))
-model = ModifiedGPTLanguageModel()
+model = GPTLanguageModel()
 m = model.to(device)
 # print the number of parameters in the model
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
@@ -270,6 +270,3 @@ for iter in range(max_iters):
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
-
-
-
