@@ -145,27 +145,18 @@ class NonUniformPositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(NonUniformPositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
-
         position = torch.arange(max_len).unsqueeze(1)
         self.register_buffer('position', position)
-
         div_term = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model))
         self.register_parameter('div_term', nn.Parameter(div_term, requires_grad=True))
-
-
         self.scale = nn.Parameter(torch.ones(max_len, 1))
 
     def forward(self, x):
         d_model = x.size(-1)
         pe = torch.zeros(x.size(0), 1, d_model, device=x.device)
-
-
         scaled_position = self.position[:x.size(0)] * self.scale[:x.size(0)]
-
-
         pe[:, 0, 0::2] = torch.sin(scaled_position * self.div_term[0: d_model // 2])
         pe[:, 0, 1::2] = torch.cos(scaled_position * self.div_term[0: d_model // 2])
-
         x = x + pe
         return self.dropout(x)
 class LongRoPETransformer(nn.Module):
