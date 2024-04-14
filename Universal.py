@@ -1,13 +1,14 @@
 import torch
-
 import torch.nn as nn
-import torch.nn.functional as F
+from torch.nn import functional as F
+ 
 
-# Hyperparameters
-batch_size = 64
-block_size = 256
+ 
+# hyperparameters
+batch_size = 64 # how many independent sequences will we process in parallel?
+block_size = 256 # what is the maximum context length for predictions?
 max_iters = 5000
-eval_interval = 300
+eval_interval = 100
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
@@ -15,8 +16,7 @@ n_embd = 384
 n_head = 6
 n_layer = 6
 dropout = 0.2
-threshold = 0.5  # Halting threshold
-max_steps = 10  # Maximum steps for the recurrent process
+# ------------
 
 torch.manual_seed(1337)
 
@@ -64,31 +64,36 @@ def estimate_loss():
     return out
 
 class Head(nn.Module):
-    """ one head of self-attention """
+    """ one head of self-attention, with an added weight matrix applied to value vectors """
 
     def __init__(self, head_size):
         super().__init__()
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
+        # Initialize weights for values
+        self.value_weights = nn.Parameter(torch.ones(head_size))
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        # input of size (batch, time-step, channels)
-        # output of size (batch, time-step, head size)
-        B,T,C = x.shape
-        k = self.key(x)   # (B,T,hs)
-        q = self.query(x) # (B,T,hs)
+        B, T, C = x.shape
+        k = self.key(x)
+        q = self.query(x)
+        v = self.value(x)
+
+        # Apply the weights directly to the value vectors
+        weighted_v = v * self.value_weights.unsqueeze(0).unsqueeze(0)  # Broadcasting weights over batch and time dimensions
+        
         # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
-        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = q @ k.transpose(-2, -1) / C ** 0.5
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
+        
         # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,hs)
-        out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        out = wei @ weighted_v  # Use the weighted values here
         return out
 
 class MultiHeadAttention(nn.Module):
@@ -119,60 +124,36 @@ class FeedFoward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-# Halting probability layer
-class HaltingLayer(nn.Module):
-    def __init__(self, n_embd):
-        super().__init__()
-        self.halting_nn = nn.Sequential(
-            nn.Linear(n_embd, 1),
-            nn.Sigmoid()
-        )
 
-    def forward(self, x):
-        return self.halting_nn(x).squeeze(-1)
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
 
-# Recurrent Transformer Block with Dynamic Halting
-class RecurrentBlock(nn.Module):
-    """ A Transformer block with dynamic halting """
-    def __init__(self, n_embd, n_head, block_size):
+    def __init__(self, n_embd, n_head):
+        # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
-        self.n_head = n_head
-        self.n_embd = n_embd
-        self.halting_layer = HaltingLayer(n_embd)
-        self.head_size = n_embd // n_head
-        self.attn = MultiHeadAttention(n_head, self.head_size)
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedFoward(n_embd)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        halting_probability = torch.zeros(x.shape[0], x.shape[1]).to(x.device)
-        remainders = torch.zeros_like(halting_probability)
-        n_updates = torch.zeros_like(halting_probability)
-        previous_states = torch.zeros_like(x)
-        step = 0
-        while ((halting_probability < threshold) & (n_updates < max_steps)).byte().any():
-            step += 1
-            p = self.halting_layer(x)
-            still_running = (halting_probability + p < 1).float()
-            p = torch.where(halting_probability + p > 1, 1 - halting_probability, p)
-            halting_probability += p * still_running
-            remainders += (1 - still_running) * (1 - remainders)
-            n_updates += still_running + remainders - n_updates * still_running
-            new_state = self.attn(self.ln1(previous_states + x)) + self.ffwd(self.ln2(x))
-            previous_states = new_state * (p.unsqueeze(-1)) + previous_states * (1 - p.unsqueeze(-1))
-        return previous_states
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
-# GPT Language Model with Universal Transformer Blocks
 class GPTLanguageModel(nn.Module):
+
     def __init__(self):
         super().__init__()
+        # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[RecurrentBlock(n_embd, n_head, block_size) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
+        # better init, not covered in the original GPT video, but important, will cover in followup video
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -185,12 +166,14 @@ class GPTLanguageModel(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        tok_emb = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
-        x = tok_emb + pos_emb
-        x = self.blocks(x)
-        x = self.ln_f(x)
-        logits = self.lm_head(x)
+
+        # idx and targets are both (B,T) tensor of integers
+        tok_emb = self.token_embedding_table(idx) # (B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb + pos_emb # (B,T,C)
+        x = self.blocks(x) # (B,T,C)
+        x = self.ln_f(x) # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
             loss = None
@@ -199,7 +182,9 @@ class GPTLanguageModel(nn.Module):
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
             loss = F.cross_entropy(logits, targets)
+
         return logits, loss
+
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
@@ -244,3 +229,4 @@ for iter in range(max_iters):
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+#open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
