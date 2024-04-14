@@ -6,7 +6,7 @@ from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import ReduceLROnPlateau 
 import math
 # hyperparameters
-batch_size = 2
+batch_size = 64
 block_size = 256
 max_iters = 3000
 eval_interval = 200
