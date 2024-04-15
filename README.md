@@ -1,5 +1,3 @@
-This is the second assignment where the perplexity is the perplexity of the model test set.
-Which implements the Swish model and Universal model in addition to the 
-'SIMPLIFYING', 'SLICEGPT', 'LongRoPE', 'Recurrent Memory' and so on.
- 
- 
+This is the second task
+In addition to the "SIMPLIFYING" model and the "UNIVERSAL" model, implement the 
+SIMPLIFYING", "SLICEGPT", "LongRoPE", "Recurrent Memory", etc., and draw their perplexities
